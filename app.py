@@ -306,7 +306,7 @@ def main():
         
         # Quick examples
         st.markdown("**Quick examples:**")
-        examples = ["ہم نے ایک خوبصورت باغ دیکھا۔", "How are you?", "Machine learning"]
+        examples = ["ہم نے ایک خوبصورت باغ دیکھا۔", "آپ کا نام کیا ہے؟", "میں سکول جاتا ہوں"]
         cols = st.columns(3)
         for i, example in enumerate(examples):
             if cols[i].button(example, use_container_width=True, key=f"example_{i}"):
