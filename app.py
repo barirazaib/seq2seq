@@ -36,6 +36,9 @@ st.markdown("""
         font-size: 1.2rem;
         font-weight: bold;
     }
+    .example-button {
+        margin-bottom: 0.5rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -293,25 +296,42 @@ def main():
         if 'input_text' not in st.session_state:
             st.session_state.input_text = ""
         
+        # Handle example selection
+        examples = ["ہم نے ایک خوبصورت باغ دیکھا۔", "آپ کا نام کیا ہے؟", "میں سکول جاتا ہوں"]
+        
+        # Check if an example was clicked
+        if 'selected_example' in st.session_state:
+            st.session_state.input_text = st.session_state.selected_example
+            # Clear the selected example after using it
+            del st.session_state.selected_example
+        
         input_text = st.text_area(
             "Enter text to transliterate:",
             value=st.session_state.input_text,
-            placeholder="Type your text here...",
+            placeholder="Type your text here or click an example below...",
             height=150,
             key="input_text_area"
         )
         
-        # Update session state
+        # Update session state with current input
         st.session_state.input_text = input_text
         
-        # Quick examples
-        st.markdown("**Quick examples:**")
-        examples = ["ہم نے ایک خوبصورت باغ دیکھا۔", "آپ کا نام کیا ہے؟", "میں سکول جاتا ہوں"]
+        # Quick examples with better handling
+        st.markdown("**Quick examples (click to try):**")
+        
+        # Create columns for examples
         cols = st.columns(3)
         for i, example in enumerate(examples):
-            if cols[i].button(example, use_container_width=True, key=f"example_{i}"):
-                st.session_state.input_text = example
-                st.rerun()
+            with cols[i]:
+                if st.button(
+                    example[:20] + "..." if len(example) > 20 else example,
+                    use_container_width=True,
+                    key=f"example_{i}",
+                    help=f"Click to use: {example}"
+                ):
+                    # Store the selected example in session state and rerun
+                    st.session_state.selected_example = example
+                    st.rerun()
     
     with col2:
         st.subheader("📤 Output")
@@ -319,23 +339,25 @@ def main():
         # Always show the transliterate button when model is loaded
         st.markdown("### Transliteration")
         
-        # Show current input text for debugging
+        # Show current input text for user feedback
         if st.session_state.input_text:
-            st.info(f"**Input:** {st.session_state.input_text}")
+            st.info(f"**Ready to transliterate:** {st.session_state.input_text}")
         
         # The transliterate button - ALWAYS VISIBLE when model is loaded
-        if st.button("🚀 Transliterate", 
-                    use_container_width=True, 
-                    type="primary",
-                    key="transliterate_btn_main"):
-            
-            if not st.session_state.input_text:
+        transliterate_clicked = st.button(
+            "🚀 Transliterate", 
+            use_container_width=True, 
+            type="primary",
+            key="transliterate_btn_main"
+        )
+        
+        if transliterate_clicked:
+            if not st.session_state.input_text.strip():
                 st.warning("⚠️ Please enter some text to transliterate.")
             else:
                 with st.spinner("🔄 Transliterating..."):
                     try:
                         # Perform transliteration
-                        st.write("🔍 Starting transliteration...")
                         output_text = transliterate_text(model, st.session_state.input_text, sp, device)
                         
                         # Display result
@@ -347,6 +369,15 @@ def main():
                         # Copy to clipboard functionality
                         st.code(output_text, language="text")
                         
+                        # Download button for result
+                        st.download_button(
+                            label="📥 Download Result",
+                            data=output_text,
+                            file_name="transliterated_text.txt",
+                            mime="text/plain",
+                            key="download_btn"
+                        )
+                        
                         # Show success message
                         st.balloons()
                         
@@ -354,18 +385,26 @@ def main():
                         st.error(f"❌ Error during transliteration: {str(e)}")
                         st.info("💡 Try a different text or check if the model files are complete.")
         
+        # Show results from previous transliteration if available
+        elif 'last_output' in st.session_state:
+            st.markdown('<div class="result-box">', unsafe_allow_html=True)
+            st.markdown("**Previous Transliteration:**")
+            st.success(st.session_state.last_output)
+            st.markdown('</div>', unsafe_allow_html=True)
+            st.code(st.session_state.last_output, language="text")
+        
         # Show instruction when no text is entered
-        if not st.session_state.input_text:
-            st.info("👆 Enter some text in the left panel and click the **Transliterate** button above!")
+        elif not st.session_state.input_text.strip():
+            st.info("👆 Enter some text in the left panel or click an example, then click the **Transliterate** button!")
         
         # Show additional help
         st.markdown("---")
         st.markdown("### 💡 Need help?")
         st.markdown("""
-        - Enter text in the left panel
+        - **Enter text** in the left panel or **click an example**
         - Click the **Transliterate** button above
         - View results in this section
-        - Try the example buttons for quick testing
+        - Download your transliterated text
         """)
     
     # Additional information
@@ -385,11 +424,11 @@ def main():
     with col_info2:
         st.markdown("### 📝 Usage Tips")
         st.markdown("""
-        - Enter text in the input box (left panel)
-        - Click the **Transliterate** button (right panel)
-        - View results in the output section
-        - Use quick example buttons for testing
-        - Results are character-level transliterations
+        - Click any example button to automatically fill the text box
+        - Modify the text if needed
+        - Click the **Transliterate** button
+        - View and download your results
+        - Try different Urdu/English texts
         """)
 
 if __name__ == "__main__":
