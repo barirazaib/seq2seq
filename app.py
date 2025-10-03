@@ -3,6 +3,7 @@ import streamlit as st
 import torch
 import os
 import requests
+import time
 from model import load_model, transliterate_text
 
 # Set page configuration
@@ -29,12 +30,48 @@ st.markdown("""
         border-left: 5px solid #1f77b4;
         margin-top: 1rem;
     }
-    .loading-spinner {
-        text-align: center;
-        padding: 2rem;
-    }
 </style>
 """, unsafe_allow_html=True)
+
+def download_with_retry(url, filename, max_retries=3):
+    """Download file with retry mechanism and proper error handling"""
+    for attempt in range(max_retries):
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            response = requests.get(url, stream=True, headers=headers, timeout=30)
+            response.raise_for_status()
+            
+            # Check if we got actual content (not HTML error page)
+            content = response.content
+            if len(content) < 1000 and b'<!DOCTYPE html>' in content or b'<html>' in content:
+                st.warning(f"Attempt {attempt + 1}: Got HTML instead of binary file. Retrying...")
+                time.sleep(2)
+                continue
+            
+            # Save file
+            with open(filename, 'wb') as f:
+                f.write(content)
+            
+            # Verify file size
+            file_size = os.path.getsize(filename)
+            if file_size == 0:
+                st.warning(f"Attempt {attempt + 1}: Downloaded empty file. Retrying...")
+                os.remove(filename)
+                time.sleep(2)
+                continue
+                
+            return True, file_size, None
+            
+        except Exception as e:
+            error_msg = f"Attempt {attempt + 1} failed: {str(e)}"
+            st.warning(error_msg)
+            if attempt < max_retries - 1:
+                time.sleep(2)
+    
+    return False, 0, f"Failed after {max_retries} attempts"
 
 @st.cache_resource
 def download_model_files():
@@ -44,44 +81,50 @@ def download_model_files():
         'joint_char.model': 'https://github.com/barirazaib/seq2seq/raw/main/joint_char.model'
     }
     
+    # Alternative URLs in case main ones fail
+    alternative_urls = {
+        'best_seq2seq_joint.pth': [
+            'https://github.com/barirazaib/seq2seq/raw/main/best_seq2seq_joint.pth',
+            'https://raw.githubusercontent.com/barirazaib/seq2seq/main/best_seq2seq_joint.pth'
+        ],
+        'joint_char.model': [
+            'https://github.com/barirazaib/seq2seq/raw/main/joint_char.model',
+            'https://raw.githubusercontent.com/barirazaib/seq2seq/main/joint_char.model'
+        ]
+    }
+    
     downloaded_all = True
     download_status = {}
     
-    for filename, url in files.items():
-        if not os.path.exists(filename):
-            try:
-                # Show download progress
-                response = requests.get(url, stream=True)
-                response.raise_for_status()
-                
-                total_size = int(response.headers.get('content-length', 0))
-                
-                with open(filename, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                
-                file_size = os.path.getsize(filename)
-                download_status[filename] = {
-                    'status': 'success',
-                    'size': file_size
-                }
-                st.toast(f"✅ Downloaded {filename}", icon="✅")
-                
-            except Exception as e:
-                download_status[filename] = {
-                    'status': 'error',
-                    'error': str(e)
-                }
-                downloaded_all = False
-                st.toast(f"❌ Failed to download {filename}", icon="❌")
-        else:
-            # File already exists
+    for filename, main_url in files.items():
+        if os.path.exists(filename):
             file_size = os.path.getsize(filename)
-            download_status[filename] = {
-                'status': 'exists',
-                'size': file_size
-            }
+            if file_size > 1000:  # Reasonable minimum size
+                download_status[filename] = {'status': 'exists', 'size': file_size}
+                continue
+            else:
+                # Remove corrupted/small file
+                os.remove(filename)
+        
+        # Try to download
+        success = False
+        file_size = 0
+        error_msg = None
+        
+        # Try multiple URL variations
+        for url in alternative_urls[filename]:
+            st.info(f"Downloading {filename} from {url}...")
+            success, file_size, error_msg = download_with_retry(url, filename)
+            if success:
+                break
+        
+        if success:
+            download_status[filename] = {'status': 'success', 'size': file_size}
+            st.toast(f"✅ Downloaded {filename} ({file_size // 1024} KB)", icon="✅")
+        else:
+            download_status[filename] = {'status': 'error', 'error': error_msg}
+            downloaded_all = False
+            st.toast(f"❌ Failed to download {filename}", icon="❌")
     
     return downloaded_all, download_status
 
@@ -96,6 +139,14 @@ def initialize_model():
         return None, None, None, download_status, error_msg
     
     try:
+        # Verify file sizes are reasonable
+        model_size = os.path.getsize('best_seq2seq_joint.pth')
+        tokenizer_size = os.path.getsize('joint_char.model')
+        
+        if model_size < 1000:  # Model file should be much larger
+            error_msg = f"Model file seems too small ({model_size} bytes). It may be corrupted."
+            return None, None, None, download_status, error_msg
+        
         # Determine device
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
@@ -128,9 +179,24 @@ def main():
     # Header
     st.markdown('<h1 class="main-header">🔤 Text Transliteration System</h1>', unsafe_allow_html=True)
     
-    # Show loading spinner while initializing
-    with st.spinner("🚀 Initializing transliteration app... Downloading model files if needed..."):
-        model, sp, device, download_status, error_msg = initialize_model()
+    # Initialize the app
+    if 'initialized' not in st.session_state:
+        with st.spinner("🚀 Initializing transliteration app... Downloading model files if needed..."):
+            model, sp, device, download_status, error_msg = initialize_model()
+        st.session_state.update({
+            'model': model,
+            'sp': sp,
+            'device': device,
+            'download_status': download_status,
+            'error_msg': error_msg,
+            'initialized': True
+        })
+    else:
+        model = st.session_state.model
+        sp = st.session_state.sp
+        device = st.session_state.device
+        download_status = st.session_state.download_status
+        error_msg = st.session_state.error_msg
     
     # Sidebar with download status
     show_download_status(download_status)
@@ -143,28 +209,62 @@ def main():
         "using SentencePiece tokenization."
     )
     
+    # Manual download section
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🔧 Manual Download")
+    st.sidebar.markdown("""
+    If automatic download fails:
+    1. Go to [GitHub Repository](https://github.com/barirazaib/seq2seq)
+    2. Find the files in the main branch
+    3. Click on each file → 'Download' button
+    4. Save in this app's folder
+    """)
+    
     # Check if model loaded successfully
     if model is None:
         st.error(f"""
         ❌ {error_msg}
         
-        **Troubleshooting steps:**
-        1. **Check your internet connection** and reload the app
-        2. **Refresh the page** (F5 or Ctrl+R)
-        3. **Wait a moment** and try again - GitHub might be busy
-        4. **Check the sidebar** for specific file download errors
+        **Quick Fix Options:**
         
-        If the problem continues, you can manually download the files:
-        - [best_seq2seq_joint.pth](https://github.com/barirazaib/seq2seq/raw/main/best_seq2seq_joint.pth)
-        - [joint_char.model](https://github.com/barirazaib/seq2seq/raw/main/joint_char.model)
-        
-        Download them and place in the same folder as this app.
+        **Option 1: Retry Download**
         """)
         
-        # Show retry button
-        if st.button("🔄 Retry Initialization", type="primary"):
-            st.cache_resource.clear()
-            st.rerun()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Retry Automatic Download", type="primary", use_container_width=True):
+                st.cache_resource.clear()
+                if 'initialized' in st.session_state:
+                    del st.session_state['initialized']
+                st.rerun()
+        
+        with col2:
+            if st.button("🗑️ Clear Cache & Retry", use_container_width=True):
+                st.cache_resource.clear()
+                # Remove existing files
+                for file in ['best_seq2seq_joint.pth', 'joint_char.model']:
+                    if os.path.exists(file):
+                        os.remove(file)
+                if 'initialized' in st.session_state:
+                    del st.session_state['initialized']
+                st.rerun()
+        
+        st.markdown("""
+        **Option 2: Manual Download**
+        
+        Please manually download these files:
+        
+        1. **[best_seq2seq_joint.pth](https://github.com/barirazaib/seq2seq/raw/main/best_seq2seq_joint.pth)**
+           - Right-click → "Save link as..."
+           - Save as `best_seq2seq_joint.pth`
+           - Expected size: ~5-50 MB
+        
+        2. **[joint_char.model](https://github.com/barirazaib/seq2seq/raw/main/joint_char.model)**
+           - Right-click → "Save link as..." 
+           - Save as `joint_char.model`
+        
+        Then click the retry button above.
+        """)
         return
     
     # Show success message
@@ -176,47 +276,26 @@ def main():
     with col1:
         st.subheader("📥 Input Text")
         
-        # Input options
-        input_method = st.radio(
-            "Choose input method:",
-            ["Text Input", "Example Texts"],
-            horizontal=True
+        input_text = st.text_area(
+            "Enter text to transliterate:",
+            placeholder="Type your text here...",
+            height=150,
+            key="input_text"
         )
         
-        input_text = ""
-        if input_method == "Text Input":
-            input_text = st.text_area(
-                "Enter text to transliterate:",
-                placeholder="Type your text here...",
-                height=150,
-                key="input_text"
-            )
-        else:
-            example_options = {
-                "Hello world": "Hello world",
-                "How are you?": "How are you?",
-                "Machine learning": "Machine learning", 
-                "Natural language processing": "Natural language processing",
-                "Test sentence": "Test sentence"
-            }
-            selected_example = st.selectbox(
-                "Choose an example:",
-                list(example_options.keys()),
-                key="example_selector"
-            )
-            input_text = example_options[selected_example]
-            st.text_area(
-                "Selected example:", 
-                value=input_text, 
-                height=100, 
-                disabled=True,
-                key="example_display"
-            )
+        # Quick examples
+        st.markdown("**Quick examples:**")
+        examples = ["Hello world", "How are you?", "Machine learning"]
+        cols = st.columns(3)
+        for i, example in enumerate(examples):
+            if cols[i].button(example, use_container_width=True):
+                st.session_state.input_text = example
+                st.rerun()
     
     with col2:
         st.subheader("📤 Output")
         
-        if input_text and st.button("🚀 Transliterate", use_container_width=True, key="transliterate_btn"):
+        if input_text and st.button("🚀 Transliterate", use_container_width=True, type="primary"):
             with st.spinner("Transliterating..."):
                 try:
                     # Perform transliteration
@@ -231,52 +310,33 @@ def main():
                     # Copy to clipboard functionality
                     st.code(output_text, language="text")
                     
-                    # Download button for result
-                    st.download_button(
-                        label="📥 Download Result",
-                        data=output_text,
-                        file_name="transliterated_text.txt",
-                        mime="text/plain",
-                        key="download_btn"
-                    )
-                    
                 except Exception as e:
                     st.error(f"Error during transliteration: {str(e)}")
         
         elif not input_text:
-            st.info("👆 Enter some text on the left and click the transliterate button!")
+            st.info("👆 Enter some text and click the transliterate button!")
     
     # Additional information
     st.markdown("---")
-    col_info1, col_info2, col_info3 = st.columns(3)
+    col_info1, col_info2 = st.columns(2)
     
     with col_info1:
         st.markdown("### ℹ️ Model Info")
-        st.markdown("""
+        st.markdown(f"""
         - **Architecture**: Seq2Seq with LSTM
         - **Encoder**: Bidirectional LSTM  
-        - **Decoder**: LSTM
-        - **Tokenization**: SentencePiece
+        - **Device**: {device}
+        - **Vocab Size**: {sp.get_piece_size()}
+        - **Model File**: {os.path.getsize('best_seq2seq_joint.pth') // 1024} KB
         """)
     
     with col_info2:
-        st.markdown("### ⚙️ Technical Details")
-        st.markdown(f"""
-        - **Embedding Dim**: 256
-        - **Hidden Dim**: 256
-        - **Layers**: 2
-        - **Dropout**: 0.3
-        - **Device**: {device}
-        - **Vocab Size**: {sp.get_piece_size()}
-        """)
-    
-    with col_info3:
         st.markdown("### 📝 Usage Tips")
         st.markdown("""
         - Enter text in the input box
         - Click the transliterate button
         - View results in the output section
-        - Use examples to test the model
+        - Use quick example buttons for testing
         - Results are character-level transliterations
         """)
 
