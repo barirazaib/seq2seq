@@ -1,8 +1,8 @@
 # app.py
 import streamlit as st
 import torch
-import sys
 import os
+import requests
 from model import load_model, transliterate_text
 
 # Set page configuration
@@ -29,53 +29,73 @@ st.markdown("""
         border-left: 5px solid #1f77b4;
         margin-top: 1rem;
     }
-    .warning-box {
-        background-color: #fff3cd;
-        padding: 1rem;
-        border-radius: 5px;
-        border-left: 5px solid #ffc107;
-        margin: 1rem 0;
+    .loading-spinner {
+        text-align: center;
+        padding: 2rem;
     }
 </style>
 """, unsafe_allow_html=True)
 
+@st.cache_resource
 def download_model_files():
-    """Function to handle model file downloads - users need to download manually"""
-    st.sidebar.markdown("### 📁 Download Model Files")
-    st.sidebar.markdown("""
-    You need to download these files and place them in the same directory as this app:
+    """Download model files from GitHub automatically on startup"""
+    files = {
+        'best_seq2seq_joint.pth': 'https://github.com/barirazaib/seq2seq/raw/main/best_seq2seq_joint.pth',
+        'joint_char.model': 'https://github.com/barirazaib/seq2seq/raw/main/joint_char.model'
+    }
     
-    **Required Files:**
-    - [best_seq2seq_joint.pth](https://github.com/barirazaib/seq2seq/blob/main/best_seq2seq_joint.pth)
-    - [joint_char.model](https://github.com/barirazaib/seq2seq/blob/main/joint_char.model)
+    downloaded_all = True
+    download_status = {}
     
-    ⚠️ **Right-click → 'Save link as...'** to download each file.
-    """)
+    for filename, url in files.items():
+        if not os.path.exists(filename):
+            try:
+                # Show download progress
+                response = requests.get(url, stream=True)
+                response.raise_for_status()
+                
+                total_size = int(response.headers.get('content-length', 0))
+                block_size = 8192
+                downloaded_size = 0
+                
+                with open(filename, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=block_size):
+                        f.write(chunk)
+                        downloaded_size += len(chunk)
+                
+                download_status[filename] = {
+                    'status': 'success',
+                    'size': downloaded_size
+                }
+                
+            except Exception as e:
+                download_status[filename] = {
+                    'status': 'error',
+                    'error': str(e)
+                }
+                downloaded_all = False
+        else:
+            # File already exists
+            file_size = os.path.getsize(filename)
+            download_status[filename] = {
+                'status': 'exists',
+                'size': file_size
+            }
+    
+    return downloaded_all, download_status
 
-def check_model_files():
-    """Check if required model files exist"""
-    required_files = ['best_seq2seq_joint.pth', 'joint_char.model']
-    missing_files = []
+@st.cache_resource
+def initialize_model():
+    """Initialize the model with automatic file downloading"""
+    # First, ensure model files are available
+    downloaded_all, download_status = download_model_files()
     
-    for file in required_files:
-        if not os.path.exists(file):
-            missing_files.append(file)
-    
-    return missing_files
-
-def load_model_with_progress():
-    """Load model with progress indicator"""
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    status_text.text("Loading model...")
-    progress_bar.progress(30)
+    if not downloaded_all:
+        return None, None, None, download_status
     
     try:
         # Determine device
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        status_text.text(f"Using device: {device}")
-        progress_bar.progress(50)
         
         # Load model
         model, sp = load_model(
@@ -83,22 +103,37 @@ def load_model_with_progress():
             sp_model_path="joint_char.model",
             device=device
         )
-        progress_bar.progress(80)
         
-        status_text.text("Model loaded successfully!")
-        progress_bar.progress(100)
-        
-        return model, sp, device
+        return model, sp, device, download_status
         
     except Exception as e:
         st.error(f"Error loading model: {str(e)}")
-        return None, None, None
+        return None, None, None, download_status
+
+def show_download_status(download_status):
+    """Show download status in the sidebar"""
+    st.sidebar.markdown("### 📁 Model Files Status")
+    
+    for filename, status_info in download_status.items():
+        if status_info['status'] == 'exists':
+            st.sidebar.success(f"✅ {filename} ({status_info['size'] // 1024} KB)")
+        elif status_info['status'] == 'success':
+            st.sidebar.success(f"✅ Downloaded {filename} ({status_info['size'] // 1024} KB)")
+        elif status_info['status'] == 'error':
+            st.sidebar.error(f"❌ {filename}: {status_info['error']}")
 
 def main():
+    # Show loading spinner while initializing
+    with st.spinner("🚀 Initializing transliteration app... Please wait."):
+        model, sp, device, download_status = initialize_model()
+    
     # Header
     st.markdown('<h1 class="main-header">🔤 Text Transliteration System</h1>', unsafe_allow_html=True)
     
-    # Sidebar
+    # Sidebar with download status
+    show_download_status(download_status)
+    
+    st.sidebar.markdown("---")
     st.sidebar.title("About")
     st.sidebar.info(
         "This app uses a Sequence-to-Sequence (Seq2Seq) model with LSTM layers "
@@ -106,32 +141,26 @@ def main():
         "using SentencePiece tokenization."
     )
     
-    # Model file download instructions
-    download_model_files()
-    
-    # Check for model files
-    missing_files = check_model_files()
-    
-    if missing_files:
-        st.error(f"❌ Missing required model files: {', '.join(missing_files)}")
-        st.markdown("""
-        ### Please download the required files:
-        1. Go to the GitHub repository links in the sidebar
-        2. Download both files
-        3. Place them in the same directory as this app
-        """)
-        return
-    
-    # Load model (cached to avoid reloading on every interaction)
-    @st.cache_resource(show_spinner=False)
-    def cached_load_model():
-        return load_model_with_progress()
-    
-    model, sp, device = cached_load_model()
-    
+    # Check if model loaded successfully
     if model is None:
-        st.error("Failed to load the model. Please check the model files.")
+        st.error("""
+        ❌ Failed to initialize the model. 
+        
+        **Possible solutions:**
+        1. Check your internet connection and reload the app
+        2. The model files might be temporarily unavailable
+        3. Try refreshing the page in a few moments
+        
+        If the problem persists, please check the GitHub repository for updates.
+        """)
+        
+        # Show retry button
+        if st.button("🔄 Retry Initialization"):
+            st.rerun()
         return
+    
+    # Show success message
+    st.success(f"✅ Model loaded successfully on **{device}**!")
     
     # Main content area
     col1, col2 = st.columns([1, 1])
@@ -146,30 +175,40 @@ def main():
             horizontal=True
         )
         
+        input_text = ""
         if input_method == "Text Input":
             input_text = st.text_area(
                 "Enter text to transliterate:",
                 placeholder="Type your text here...",
-                height=150
+                height=150,
+                key="input_text"
             )
         else:
             example_options = {
                 "Hello world": "Hello world",
                 "How are you?": "How are you?",
-                "Machine learning": "Machine learning",
-                "Natural language processing": "Natural language processing"
+                "Machine learning": "Machine learning", 
+                "Natural language processing": "Natural language processing",
+                "Test sentence": "Test sentence"
             }
             selected_example = st.selectbox(
                 "Choose an example:",
-                list(example_options.keys())
+                list(example_options.keys()),
+                key="example_selector"
             )
             input_text = example_options[selected_example]
-            st.text_area("Selected example:", value=input_text, height=100, disabled=True)
+            st.text_area(
+                "Selected example:", 
+                value=input_text, 
+                height=100, 
+                disabled=True,
+                key="example_display"
+            )
     
     with col2:
         st.subheader("📤 Output")
         
-        if input_text and st.button("🚀 Transliterate", use_container_width=True):
+        if input_text and st.button("🚀 Transliterate", use_container_width=True, key="transliterate_btn"):
             with st.spinner("Transliterating..."):
                 try:
                     # Perform transliteration
@@ -183,6 +222,15 @@ def main():
                     
                     # Copy to clipboard functionality
                     st.code(output_text, language="text")
+                    
+                    # Download button for result
+                    st.download_button(
+                        label="📥 Download Result",
+                        data=output_text,
+                        file_name="transliterated_text.txt",
+                        mime="text/plain",
+                        key="download_btn"
+                    )
                     
                 except Exception as e:
                     st.error(f"Error during transliteration: {str(e)}")
@@ -198,20 +246,21 @@ def main():
         st.markdown("### ℹ️ Model Info")
         st.markdown("""
         - **Architecture**: Seq2Seq with LSTM
-        - **Encoder**: Bidirectional LSTM
-        - **Decoder**: LSTM with Attention
+        - **Encoder**: Bidirectional LSTM  
+        - **Decoder**: LSTM
         - **Tokenization**: SentencePiece
         """)
     
     with col_info2:
         st.markdown("### ⚙️ Technical Details")
-        st.markdown("""
+        st.markdown(f"""
         - **Embedding Dim**: 256
         - **Hidden Dim**: 256
         - **Layers**: 2
         - **Dropout**: 0.3
-        - **Device**: {}
-        """.format(device))
+        - **Device**: {device}
+        - **Vocab Size**: {sp.get_piece_size()}
+        """)
     
     with col_info3:
         st.markdown("### 📝 Usage Tips")
