@@ -201,10 +201,10 @@ def show_download_status(download_status):
   #  "کیا آپ میری مدد کر سکتے ہیں؟"
 #]
 
-def set_example_text(example_text):
-    """Callback function to set example text"""
-    st.session_state.input_text = example_text
-    st.session_state.example_used = True
+#def set_example_text(example_text):
+    #"""Callback function to set example text"""
+    #st.session_state.input_text = example_text
+    #st.session_state.example_used = True
 
 def main():
     # Header
