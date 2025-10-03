@@ -30,6 +30,12 @@ st.markdown("""
         border-left: 5px solid #1f77b4;
         margin-top: 1rem;
     }
+    .stButton button {
+        width: 100%;
+        height: 3rem;
+        font-size: 1.2rem;
+        font-weight: bold;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -46,7 +52,7 @@ def download_with_retry(url, filename, max_retries=3):
             
             # Check if we got actual content (not HTML error page)
             content = response.content
-            if len(content) < 1000 and b'<!DOCTYPE html>' in content or b'<html>' in content:
+            if len(content) < 1000 and (b'<!DOCTYPE html>' in content or b'<html>' in content):
                 st.warning(f"Attempt {attempt + 1}: Got HTML instead of binary file. Retrying...")
                 time.sleep(2)
                 continue
@@ -270,51 +276,97 @@ def main():
     # Show success message
     st.success(f"✅ Model loaded successfully on **{device}**! You can now start transliterating text.")
     
+    # Debug information (can be removed later)
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🔍 Debug Info")
+    st.sidebar.write(f"Model: {'Loaded' if model else 'None'}")
+    st.sidebar.write(f"Tokenizer: {'Loaded' if sp else 'None'}")
+    st.sidebar.write(f"Device: {device}")
+    
     # Main content area
     col1, col2 = st.columns([1, 1])
     
     with col1:
         st.subheader("📥 Input Text")
         
+        # Initialize session state for input text if not exists
+        if 'input_text' not in st.session_state:
+            st.session_state.input_text = ""
+        
         input_text = st.text_area(
             "Enter text to transliterate:",
+            value=st.session_state.input_text,
             placeholder="Type your text here...",
             height=150,
-            key="input_text"
+            key="input_text_area"
         )
+        
+        # Update session state
+        st.session_state.input_text = input_text
         
         # Quick examples
         st.markdown("**Quick examples:**")
         examples = ["ہم نے ایک خوبصورت باغ دیکھا۔", "How are you?", "Machine learning"]
         cols = st.columns(3)
         for i, example in enumerate(examples):
-            if cols[i].button(example, use_container_width=True):
+            if cols[i].button(example, use_container_width=True, key=f"example_{i}"):
                 st.session_state.input_text = example
                 st.rerun()
     
     with col2:
         st.subheader("📤 Output")
         
-        if input_text and st.button("🚀 Transliterate", use_container_width=True, type="primary"):
-            with st.spinner("Transliterating..."):
-                try:
-                    # Perform transliteration
-                    output_text = transliterate_text(model, input_text, sp, device)
-                    
-                    # Display result
-                    st.markdown('<div class="result-box">', unsafe_allow_html=True)
-                    st.markdown("**Transliterated Text:**")
-                    st.success(output_text)
-                    st.markdown('</div>', unsafe_allow_html=True)
-                    
-                    # Copy to clipboard functionality
-                    st.code(output_text, language="text")
-                    
-                except Exception as e:
-                    st.error(f"Error during transliteration: {str(e)}")
+        # Always show the transliterate button when model is loaded
+        st.markdown("### Transliteration")
         
-        elif not input_text:
-            st.info("👆 Enter some text and click the transliterate button!")
+        # Show current input text for debugging
+        if st.session_state.input_text:
+            st.info(f"**Input:** {st.session_state.input_text}")
+        
+        # The transliterate button - ALWAYS VISIBLE when model is loaded
+        if st.button("🚀 Transliterate", 
+                    use_container_width=True, 
+                    type="primary",
+                    key="transliterate_btn_main"):
+            
+            if not st.session_state.input_text:
+                st.warning("⚠️ Please enter some text to transliterate.")
+            else:
+                with st.spinner("🔄 Transliterating..."):
+                    try:
+                        # Perform transliteration
+                        st.write("🔍 Starting transliteration...")
+                        output_text = transliterate_text(model, st.session_state.input_text, sp, device)
+                        
+                        # Display result
+                        st.markdown('<div class="result-box">', unsafe_allow_html=True)
+                        st.markdown("**Transliterated Text:**")
+                        st.success(output_text)
+                        st.markdown('</div>', unsafe_allow_html=True)
+                        
+                        # Copy to clipboard functionality
+                        st.code(output_text, language="text")
+                        
+                        # Show success message
+                        st.balloons()
+                        
+                    except Exception as e:
+                        st.error(f"❌ Error during transliteration: {str(e)}")
+                        st.info("💡 Try a different text or check if the model files are complete.")
+        
+        # Show instruction when no text is entered
+        if not st.session_state.input_text:
+            st.info("👆 Enter some text in the left panel and click the **Transliterate** button above!")
+        
+        # Show additional help
+        st.markdown("---")
+        st.markdown("### 💡 Need help?")
+        st.markdown("""
+        - Enter text in the left panel
+        - Click the **Transliterate** button above
+        - View results in this section
+        - Try the example buttons for quick testing
+        """)
     
     # Additional information
     st.markdown("---")
@@ -326,15 +378,15 @@ def main():
         - **Architecture**: Seq2Seq with LSTM
         - **Encoder**: Bidirectional LSTM  
         - **Device**: {device}
-        - **Vocab Size**: {sp.get_piece_size()}
-        - **Model File**: {os.path.getsize('best_seq2seq_joint.pth') // 1024} KB
+        - **Vocab Size**: {sp.get_piece_size() if sp else 'N/A'}
+        - **Model File**: {os.path.getsize('best_seq2seq_joint.pth') // 1024 if os.path.exists('best_seq2seq_joint.pth') else 0} KB
         """)
     
     with col_info2:
         st.markdown("### 📝 Usage Tips")
         st.markdown("""
-        - Enter text in the input box
-        - Click the transliterate button
+        - Enter text in the input box (left panel)
+        - Click the **Transliterate** button (right panel)
         - View results in the output section
         - Use quick example buttons for testing
         - Results are character-level transliterations
