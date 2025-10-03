@@ -1,112 +1,227 @@
-# model.py
+# app.py
+import streamlit as st
 import torch
-import torch.nn as nn
-import sentencepiece as spm
-import math
+import sys
+import os
+from model import load_model, transliterate_text
 
-PAD_IDX = 0
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Set page configuration
+st.set_page_config(
+    page_title="Text Transliteration App",
+    page_icon="🔤",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# -------------------------
-# Encoder
-# -------------------------
-class Encoder(nn.Module):
-    def __init__(self, input_dim, emb_dim, hid_dim, n_layers=2, dropout=0.3):
-        super().__init__()
-        self.embedding = nn.Embedding(input_dim, emb_dim, padding_idx=PAD_IDX)
-        self.rnn = nn.LSTM(
-            emb_dim, hid_dim, num_layers=n_layers,
-            bidirectional=True, batch_first=True,
-            dropout=dropout if n_layers > 1 else 0
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .result-box {
+        background-color: #f0f2f6;
+        padding: 1.5rem;
+        border-radius: 10px;
+        border-left: 5px solid #1f77b4;
+        margin-top: 1rem;
+    }
+    .warning-box {
+        background-color: #fff3cd;
+        padding: 1rem;
+        border-radius: 5px;
+        border-left: 5px solid #ffc107;
+        margin: 1rem 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+def download_model_files():
+    """Function to handle model file downloads - users need to download manually"""
+    st.sidebar.markdown("### 📁 Download Model Files")
+    st.sidebar.markdown("""
+    You need to download these files and place them in the same directory as this app:
+    
+    **Required Files:**
+    - [best_seq2seq_joint.pth](https://github.com/barirazaib/seq2seq/blob/main/best_seq2seq_joint.pth)
+    - [joint_char.model](https://github.com/barirazaib/seq2seq/blob/main/joint_char.model)
+    
+    ⚠️ **Right-click → 'Save link as...'** to download each file.
+    """)
+
+def check_model_files():
+    """Check if required model files exist"""
+    required_files = ['best_seq2seq_joint.pth', 'joint_char.model']
+    missing_files = []
+    
+    for file in required_files:
+        if not os.path.exists(file):
+            missing_files.append(file)
+    
+    return missing_files
+
+def load_model_with_progress():
+    """Load model with progress indicator"""
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    status_text.text("Loading model...")
+    progress_bar.progress(30)
+    
+    try:
+        # Determine device
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        status_text.text(f"Using device: {device}")
+        progress_bar.progress(50)
+        
+        # Load model
+        model, sp = load_model(
+            model_path="best_seq2seq_joint.pth",
+            sp_model_path="joint_char.model",
+            device=device
         )
-        self.dropout = nn.Dropout(dropout)
+        progress_bar.progress(80)
+        
+        status_text.text("Model loaded successfully!")
+        progress_bar.progress(100)
+        
+        return model, sp, device
+        
+    except Exception as e:
+        st.error(f"Error loading model: {str(e)}")
+        return None, None, None
 
-    def forward(self, src):
-        emb = self.dropout(self.embedding(src))
-        outputs, (hidden, cell) = self.rnn(emb)
-        return outputs, hidden, cell
-
-# -------------------------
-# Decoder
-# -------------------------
-class Decoder(nn.Module):
-    def __init__(self, output_dim, emb_dim, hid_dim, n_layers=2, dropout=0.3):
-        super().__init__()
-        self.embedding = nn.Embedding(output_dim, emb_dim, padding_idx=PAD_IDX)
-        self.rnn = nn.LSTM(
-            emb_dim, hid_dim*2, num_layers=n_layers,
-            batch_first=True, dropout=dropout if n_layers > 1 else 0
+def main():
+    # Header
+    st.markdown('<h1 class="main-header">🔤 Text Transliteration System</h1>', unsafe_allow_html=True)
+    
+    # Sidebar
+    st.sidebar.title("About")
+    st.sidebar.info(
+        "This app uses a Sequence-to-Sequence (Seq2Seq) model with LSTM layers "
+        "for text transliteration. The model is trained on character-level representations "
+        "using SentencePiece tokenization."
+    )
+    
+    # Model file download instructions
+    download_model_files()
+    
+    # Check for model files
+    missing_files = check_model_files()
+    
+    if missing_files:
+        st.error(f"❌ Missing required model files: {', '.join(missing_files)}")
+        st.markdown("""
+        ### Please download the required files:
+        1. Go to the GitHub repository links in the sidebar
+        2. Download both files
+        3. Place them in the same directory as this app
+        """)
+        return
+    
+    # Load model (cached to avoid reloading on every interaction)
+    @st.cache_resource(show_spinner=False)
+    def cached_load_model():
+        return load_model_with_progress()
+    
+    model, sp, device = cached_load_model()
+    
+    if model is None:
+        st.error("Failed to load the model. Please check the model files.")
+        return
+    
+    # Main content area
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.subheader("📥 Input Text")
+        
+        # Input options
+        input_method = st.radio(
+            "Choose input method:",
+            ["Text Input", "Example Texts"],
+            horizontal=True
         )
-        self.fc_out = nn.Linear(hid_dim*2, output_dim)
-        self.dropout = nn.Dropout(dropout)
+        
+        if input_method == "Text Input":
+            input_text = st.text_area(
+                "Enter text to transliterate:",
+                placeholder="Type your text here...",
+                height=150
+            )
+        else:
+            example_options = {
+                "Hello world": "Hello world",
+                "How are you?": "How are you?",
+                "Machine learning": "Machine learning",
+                "Natural language processing": "Natural language processing"
+            }
+            selected_example = st.selectbox(
+                "Choose an example:",
+                list(example_options.keys())
+            )
+            input_text = example_options[selected_example]
+            st.text_area("Selected example:", value=input_text, height=100, disabled=True)
+    
+    with col2:
+        st.subheader("📤 Output")
+        
+        if input_text and st.button("🚀 Transliterate", use_container_width=True):
+            with st.spinner("Transliterating..."):
+                try:
+                    # Perform transliteration
+                    output_text = transliterate_text(model, input_text, sp, device)
+                    
+                    # Display result
+                    st.markdown('<div class="result-box">', unsafe_allow_html=True)
+                    st.markdown("**Transliterated Text:**")
+                    st.success(output_text)
+                    st.markdown('</div>', unsafe_allow_html=True)
+                    
+                    # Copy to clipboard functionality
+                    st.code(output_text, language="text")
+                    
+                except Exception as e:
+                    st.error(f"Error during transliteration: {str(e)}")
+        
+        elif not input_text:
+            st.info("👆 Enter some text on the left and click the transliterate button!")
+    
+    # Additional information
+    st.markdown("---")
+    col_info1, col_info2, col_info3 = st.columns(3)
+    
+    with col_info1:
+        st.markdown("### ℹ️ Model Info")
+        st.markdown("""
+        - **Architecture**: Seq2Seq with LSTM
+        - **Encoder**: Bidirectional LSTM
+        - **Decoder**: LSTM with Attention
+        - **Tokenization**: SentencePiece
+        """)
+    
+    with col_info2:
+        st.markdown("### ⚙️ Technical Details")
+        st.markdown("""
+        - **Embedding Dim**: 256
+        - **Hidden Dim**: 256
+        - **Layers**: 2
+        - **Dropout**: 0.3
+        - **Device**: {}
+        """.format(device))
+    
+    with col_info3:
+        st.markdown("### 📝 Usage Tips")
+        st.markdown("""
+        - Enter text in the input box
+        - Click the transliterate button
+        - View results in the output section
+        - Use examples to test the model
+        - Results are character-level transliterations
+        """)
 
-    def forward(self, input, hidden, cell):
-        input = input.unsqueeze(1)
-        emb = self.dropout(self.embedding(input))
-        output, (hidden, cell) = self.rnn(emb, (hidden, cell))
-        pred = self.fc_out(output.squeeze(1))
-        return pred, hidden, cell
-
-# -------------------------
-# Seq2Seq Model
-# -------------------------
-class Seq2Seq(nn.Module):
-    def __init__(self, encoder, decoder, device):
-        super().__init__()
-        self.encoder = encoder
-        self.decoder = decoder
-        self.device = device
-
-    @staticmethod
-    def transform_enc_to_dec(state, dec_layers):
-        enc_layers = state.size(0) // 2
-        pieces = []
-        for i in range(enc_layers):
-            f = state[2*i]
-            b = state[2*i+1]
-            pieces.append(torch.cat((f, b), dim=1))
-        new_state = torch.stack(pieces, dim=0)
-        if new_state.size(0) < dec_layers:
-            reps = math.ceil(dec_layers / new_state.size(0))
-            new_state = new_state.repeat(reps, 1, 1)
-        return new_state[:dec_layers]
-
-# -------------------------
-# Load model + tokenizer
-# -------------------------
-def load_model(model_path="best_seq2seq_joint.pth", sp_model="joint_char.model",
-               emb_dim=256, hid_dim=256, layers=2, dropout=0.3):
-    sp = spm.SentencePieceProcessor(model_file=sp_model)
-    vocab_size = sp.get_piece_size()
-
-    encoder = Encoder(vocab_size, emb_dim, hid_dim, layers, dropout)
-    decoder = Decoder(vocab_size, emb_dim, hid_dim, layers, dropout)
-    model = Seq2Seq(encoder, decoder, DEVICE).to(DEVICE)
-    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
-    model.eval()
-    return model, sp
-
-# -------------------------
-# Inference
-# -------------------------
-def transliterate_text(model, sentence, sp, max_len=50):
-    model.eval()
-    with torch.no_grad():
-        tokens = [sp.bos_id()] + sp.encode(sentence, out_type=int) + [sp.eos_id()]
-        src_tensor = torch.tensor(tokens, dtype=torch.long).unsqueeze(0).to(DEVICE)
-
-        _, hidden_enc, cell_enc = model.encoder(src_tensor)
-        dec_layers = model.decoder.rnn.num_layers
-        hidden = model.transform_enc_to_dec(hidden_enc, dec_layers).to(DEVICE)
-        cell   = model.transform_enc_to_dec(cell_enc, dec_layers).to(DEVICE)
-
-        input_token = torch.tensor([sp.bos_id()], dtype=torch.long).to(DEVICE)
-        outputs = []
-        for _ in range(max_len):
-            pred, hidden, cell = model.decoder(input_token, hidden, cell)
-            top1 = pred.argmax(1).item()
-            if top1 == sp.eos_id():
-                break
-            outputs.append(top1)
-            input_token = torch.tensor([top1], dtype=torch.long).to(DEVICE)
-    return sp.decode(outputs)
+if __name__ == "__main__":
+    main()
