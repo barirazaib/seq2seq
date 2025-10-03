@@ -55,18 +55,18 @@ def download_model_files():
                 response.raise_for_status()
                 
                 total_size = int(response.headers.get('content-length', 0))
-                block_size = 8192
-                downloaded_size = 0
                 
                 with open(filename, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=block_size):
-                        f.write(chunk)
-                        downloaded_size += len(chunk)
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
                 
+                file_size = os.path.getsize(filename)
                 download_status[filename] = {
                     'status': 'success',
-                    'size': downloaded_size
+                    'size': file_size
                 }
+                st.toast(f"✅ Downloaded {filename}", icon="✅")
                 
             except Exception as e:
                 download_status[filename] = {
@@ -74,6 +74,7 @@ def download_model_files():
                     'error': str(e)
                 }
                 downloaded_all = False
+                st.toast(f"❌ Failed to download {filename}", icon="❌")
         else:
             # File already exists
             file_size = os.path.getsize(filename)
@@ -91,7 +92,8 @@ def initialize_model():
     downloaded_all, download_status = download_model_files()
     
     if not downloaded_all:
-        return None, None, None, download_status
+        error_msg = "Failed to download model files. Please check your internet connection."
+        return None, None, None, download_status, error_msg
     
     try:
         # Determine device
@@ -104,11 +106,11 @@ def initialize_model():
             device=device
         )
         
-        return model, sp, device, download_status
+        return model, sp, device, download_status, None
         
     except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
-        return None, None, None, download_status
+        error_msg = f"Error loading model: {str(e)}"
+        return None, None, None, download_status, error_msg
 
 def show_download_status(download_status):
     """Show download status in the sidebar"""
@@ -123,12 +125,12 @@ def show_download_status(download_status):
             st.sidebar.error(f"❌ {filename}: {status_info['error']}")
 
 def main():
-    # Show loading spinner while initializing
-    with st.spinner("🚀 Initializing transliteration app... Please wait."):
-        model, sp, device, download_status = initialize_model()
-    
     # Header
     st.markdown('<h1 class="main-header">🔤 Text Transliteration System</h1>', unsafe_allow_html=True)
+    
+    # Show loading spinner while initializing
+    with st.spinner("🚀 Initializing transliteration app... Downloading model files if needed..."):
+        model, sp, device, download_status, error_msg = initialize_model()
     
     # Sidebar with download status
     show_download_status(download_status)
@@ -143,24 +145,30 @@ def main():
     
     # Check if model loaded successfully
     if model is None:
-        st.error("""
-        ❌ Failed to initialize the model. 
+        st.error(f"""
+        ❌ {error_msg}
         
-        **Possible solutions:**
-        1. Check your internet connection and reload the app
-        2. The model files might be temporarily unavailable
-        3. Try refreshing the page in a few moments
+        **Troubleshooting steps:**
+        1. **Check your internet connection** and reload the app
+        2. **Refresh the page** (F5 or Ctrl+R)
+        3. **Wait a moment** and try again - GitHub might be busy
+        4. **Check the sidebar** for specific file download errors
         
-        If the problem persists, please check the GitHub repository for updates.
+        If the problem continues, you can manually download the files:
+        - [best_seq2seq_joint.pth](https://github.com/barirazaib/seq2seq/raw/main/best_seq2seq_joint.pth)
+        - [joint_char.model](https://github.com/barirazaib/seq2seq/raw/main/joint_char.model)
+        
+        Download them and place in the same folder as this app.
         """)
         
         # Show retry button
-        if st.button("🔄 Retry Initialization"):
+        if st.button("🔄 Retry Initialization", type="primary"):
+            st.cache_resource.clear()
             st.rerun()
         return
     
     # Show success message
-    st.success(f"✅ Model loaded successfully on **{device}**!")
+    st.success(f"✅ Model loaded successfully on **{device}**! You can now start transliterating text.")
     
     # Main content area
     col1, col2 = st.columns([1, 1])
