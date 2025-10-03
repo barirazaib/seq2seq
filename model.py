@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import math
 import sentencepiece as spm
+import os  # Added missing import
 
 PAD_IDX = 0
 
