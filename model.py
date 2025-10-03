@@ -64,6 +64,12 @@ class Seq2Seq(nn.Module):
 def load_model(model_path, sp_model_path, emb_dim=256, hid_dim=256, layers=2, dropout=0.3, device="cpu"):
     """Load the trained model and tokenizer"""
     try:
+        # Check if files exist
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found: {model_path}")
+        if not os.path.exists(sp_model_path):
+            raise FileNotFoundError(f"Tokenizer file not found: {sp_model_path}")
+        
         sp = spm.SentencePieceProcessor(model_file=sp_model_path)
         vocab_size = sp.get_piece_size()
 
@@ -71,9 +77,12 @@ def load_model(model_path, sp_model_path, emb_dim=256, hid_dim=256, layers=2, dr
         decoder = Decoder(vocab_size, emb_dim, hid_dim, layers, dropout)
         model = Seq2Seq(encoder, decoder, device).to(device)
 
+        # Load model weights
         model.load_state_dict(torch.load(model_path, map_location=device))
         model.eval()
+        
         return model, sp
+        
     except Exception as e:
         raise Exception(f"Error loading model: {str(e)}")
 
