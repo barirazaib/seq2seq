@@ -1,459 +1,76 @@
-# app.py
+# app_simple.py - ULTRA SIMPLE VERSION
 import streamlit as st
 import torch
 import os
-import requests
-import time
 from model import load_model, transliterate_text
 
-# Set page configuration
-st.set_page_config(
-    page_title="Text Transliteration App",
-    page_icon="🔤",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Transliteration App", layout="wide")
 
-# Custom CSS for better styling
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .result-box {
-        background-color: #f0f2f6;
-        padding: 1.5rem;
-        border-radius: 10px;
-        border-left: 5px solid #1f77b4;
-        margin-top: 1rem;
-    }
-    .stButton button {
-        width: 100%;
-        height: 3rem;
-        font-size: 1.2rem;
-        font-weight: bold;
-    }
-    .example-box {
-        border: 1px solid #ddd;
-        border-radius: 5px;
-        padding: 10px;
-        margin: 5px 0;
-        background-color: #f9f9f9;
-        cursor: pointer;
-    }
-    .example-box:hover {
-        background-color: #e9e9e9;
-    }
-</style>
-""", unsafe_allow_html=True)
+# Initialize session state
+if 'current_text' not in st.session_state:
+    st.session_state.current_text = ""
+if 'output' not in st.session_state:
+    st.session_state.output = ""
 
-def download_with_retry(url, filename, max_retries=3):
-    """Download file with retry mechanism and proper error handling"""
-    for attempt in range(max_retries):
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-            
-            response = requests.get(url, stream=True, headers=headers, timeout=30)
-            response.raise_for_status()
-            
-            # Check if we got actual content (not HTML error page)
-            content = response.content
-            if len(content) < 1000 and (b'<!DOCTYPE html>' in content or b'<html>' in content):
-                st.warning(f"Attempt {attempt + 1}: Got HTML instead of binary file. Retrying...")
-                time.sleep(2)
-                continue
-            
-            # Save file
-            with open(filename, 'wb') as f:
-                f.write(content)
-            
-            # Verify file size
-            file_size = os.path.getsize(filename)
-            if file_size == 0:
-                st.warning(f"Attempt {attempt + 1}: Downloaded empty file. Retrying...")
-                os.remove(filename)
-                time.sleep(2)
-                continue
-                
-            return True, file_size, None
-            
-        except Exception as e:
-            error_msg = f"Attempt {attempt + 1} failed: {str(e)}"
-            st.warning(error_msg)
-            if attempt < max_retries - 1:
-                time.sleep(2)
-    
-    return False, 0, f"Failed after {max_retries} attempts"
+st.title("🔤 Text Transliteration")
 
-@st.cache_resource
-def download_model_files():
-    """Download model files from GitHub automatically on startup"""
-    files = {
-        'best_seq2seq_joint.pth': 'https://github.com/barirazaib/seq2seq/raw/main/best_seq2seq_joint.pth',
-        'joint_char.model': 'https://github.com/barirazaib/seq2seq/raw/main/joint_char.model'
-    }
-    
-    # Alternative URLs in case main ones fail
-    alternative_urls = {
-        'best_seq2seq_joint.pth': [
-            'https://github.com/barirazaib/seq2seq/raw/main/best_seq2seq_joint.pth',
-            'https://raw.githubusercontent.com/barirazaib/seq2seq/main/best_seq2seq_joint.pth'
-        ],
-        'joint_char.model': [
-            'https://github.com/barirazaib/seq2seq/raw/main/joint_char.model',
-            'https://raw.githubusercontent.com/barirazaib/seq2seq/main/joint_char.model'
-        ]
-    }
-    
-    downloaded_all = True
-    download_status = {}
-    
-    for filename, main_url in files.items():
-        if os.path.exists(filename):
-            file_size = os.path.getsize(filename)
-            if file_size > 1000:  # Reasonable minimum size
-                download_status[filename] = {'status': 'exists', 'size': file_size}
-                continue
-            else:
-                # Remove corrupted/small file
-                os.remove(filename)
-        
-        # Try to download
-        success = False
-        file_size = 0
-        error_msg = None
-        
-        # Try multiple URL variations
-        for url in alternative_urls[filename]:
-            st.info(f"Downloading {filename} from {url}...")
-            success, file_size, error_msg = download_with_retry(url, filename)
-            if success:
-                break
-        
-        if success:
-            download_status[filename] = {'status': 'success', 'size': file_size}
-            st.toast(f"✅ Downloaded {filename} ({file_size // 1024} KB)", icon="✅")
-        else:
-            download_status[filename] = {'status': 'error', 'error': error_msg}
-            downloaded_all = False
-            st.toast(f"❌ Failed to download {filename}", icon="❌")
-    
-    return downloaded_all, download_status
-
-@st.cache_resource
-def initialize_model():
-    """Initialize the model with automatic file downloading"""
-    # First, ensure model files are available
-    downloaded_all, download_status = download_model_files()
-    
-    if not downloaded_all:
-        error_msg = "Failed to download model files. Please check your internet connection."
-        return None, None, None, download_status, error_msg
-    
-    try:
-        # Verify file sizes are reasonable
-        model_size = os.path.getsize('best_seq2seq_joint.pth')
-        tokenizer_size = os.path.getsize('joint_char.model')
-        
-        if model_size < 1000:  # Model file should be much larger
-            error_msg = f"Model file seems too small ({model_size} bytes). It may be corrupted."
-            return None, None, None, download_status, error_msg
-        
-        # Determine device
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        # Load model
-        model, sp = load_model(
-            model_path="best_seq2seq_joint.pth",
-            sp_model_path="joint_char.model",
-            device=device
-        )
-        
-        return model, sp, device, download_status, None
-        
-    except Exception as e:
-        error_msg = f"Error loading model: {str(e)}"
-        return None, None, None, download_status, error_msg
-
-def show_download_status(download_status):
-    """Show download status in the sidebar"""
-    st.sidebar.markdown("### 📁 Model Files Status")
-    
-    for filename, status_info in download_status.items():
-        if status_info['status'] == 'exists':
-            st.sidebar.success(f"✅ {filename} ({status_info['size'] // 1024} KB)")
-        elif status_info['status'] == 'success':
-            st.sidebar.success(f"✅ Downloaded {filename} ({status_info['size'] // 1024} KB)")
-        elif status_info['status'] == 'error':
-            st.sidebar.error(f"❌ {filename}: {status_info['error']}")
-
-# Define examples
-EXAMPLES = [
+# Simple examples
+examples = [
     "ہم نے ایک خوبصورت باغ دیکھا۔",
     "آپ کا نام کیا ہے؟", 
-    "میں سکول جاتا ہوں",
-    "یہ بہت اچھا ہے",
-    "کیا آپ میری مدد کر سکتے ہیں؟"
+    "میں سکول جاتا ہوں"
 ]
 
-def set_example_text(example_text):
-    """Callback function to set example text"""
-    st.session_state.input_text = example_text
-    st.session_state.example_used = True
+# Load model (you'll need to handle this part)
+model, sp, device = None, None, "cpu"
+# TODO: Add your model loading code here
 
-def main():
-    # Header
-    st.markdown('<h1 class="main-header">🔤 Text Transliteration System</h1>', unsafe_allow_html=True)
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("Input")
     
-    # Initialize session state
-    if 'input_text' not in st.session_state:
-        st.session_state.input_text = ""
-    if 'example_used' not in st.session_state:
-        st.session_state.example_used = False
-    if 'last_output' not in st.session_state:
-        st.session_state.last_output = ""
+    # Display example buttons
+    st.write("**Click an example:**")
+    for i, example in enumerate(examples):
+        if st.button(example, key=f"btn_{i}", use_container_width=True):
+            st.session_state.current_text = example
+            st.rerun()
     
-    # Initialize the app
-    if 'initialized' not in st.session_state:
-        with st.spinner("🚀 Initializing transliteration app... Downloading model files if needed..."):
-            model, sp, device, download_status, error_msg = initialize_model()
-        st.session_state.update({
-            'model': model,
-            'sp': sp,
-            'device': device,
-            'download_status': download_status,
-            'error_msg': error_msg,
-            'initialized': True
-        })
-    else:
-        model = st.session_state.model
-        sp = st.session_state.sp
-        device = st.session_state.device
-        download_status = st.session_state.download_status
-        error_msg = st.session_state.error_msg
-    
-    # Sidebar with download status
-    show_download_status(download_status)
-    
-    st.sidebar.markdown("---")
-    st.sidebar.title("About")
-    st.sidebar.info(
-        "This app uses a Sequence-to-Sequence (Seq2Seq) model with LSTM layers "
-        "for text transliteration. The model is trained on character-level representations "
-        "using SentencePiece tokenization."
+    # Text input
+    user_text = st.text_area(
+        "Or type your own text:",
+        value=st.session_state.current_text,
+        height=100
     )
     
-    # Manual download section
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 🔧 Manual Download")
-    st.sidebar.markdown("""
-    If automatic download fails:
-    1. Go to [GitHub Repository](https://github.com/barirazaib/seq2seq)
-    2. Find the files in the main branch
-    3. Click on each file → 'Download' button
-    4. Save in this app's folder
-    """)
+    # Update session state
+    st.session_state.current_text = user_text
     
-    # Check if model loaded successfully
-    if model is None:
-        st.error(f"""
-        ❌ {error_msg}
-        
-        **Quick Fix Options:**
-        
-        **Option 1: Retry Download**
-        """)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔄 Retry Automatic Download", type="primary", use_container_width=True):
-                st.cache_resource.clear()
-                if 'initialized' in st.session_state:
-                    del st.session_state['initialized']
-                st.rerun()
-        
-        with col2:
-            if st.button("🗑️ Clear Cache & Retry", use_container_width=True):
-                st.cache_resource.clear()
-                # Remove existing files
-                for file in ['best_seq2seq_joint.pth', 'joint_char.model']:
-                    if os.path.exists(file):
-                        os.remove(file)
-                if 'initialized' in st.session_state:
-                    del st.session_state['initialized']
-                st.rerun()
-        
-        st.markdown("""
-        **Option 2: Manual Download**
-        
-        Please manually download these files:
-        
-        1. **[best_seq2seq_joint.pth](https://github.com/barirazaib/seq2seq/raw/main/best_seq2seq_joint.pth)**
-           - Right-click → "Save link as..."
-           - Save as `best_seq2seq_joint.pth`
-           - Expected size: ~5-50 MB
-        
-        2. **[joint_char.model](https://github.com/barirazaib/seq2seq/raw/main/joint_char.model)**
-           - Right-click → "Save link as..." 
-           - Save as `joint_char.model`
-        
-        Then click the retry button above.
-        """)
-        return
-    
-    # Show success message
-    st.success(f"✅ Model loaded successfully on **{device}**! You can now start transliterating text.")
-    
-    # Debug information (can be removed later)
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 🔍 Debug Info")
-    st.sidebar.write(f"Model: {'Loaded' if model else 'None'}")
-    st.sidebar.write(f"Tokenizer: {'Loaded' if sp else 'None'}")
-    st.sidebar.write(f"Device: {device}")
-    st.sidebar.write(f"Input text length: {len(st.session_state.input_text)}")
-    
-    # Main content area
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        st.subheader("📥 Input Text")
-        
-        # Text area for input
-        input_text = st.text_area(
-            "Enter text to transliterate:",
-            value=st.session_state.input_text,
-            placeholder="Type your text here or click an example below...",
-            height=150,
-            key="input_text_area"
-        )
-        
-        # Update session state with current input
-        st.session_state.input_text = input_text
-        
-        # Quick examples section
-        st.markdown("**💡 Quick examples (click to use):**")
-        
-        # Display examples as clickable boxes
-        for i, example in enumerate(EXAMPLES):
-            col_ex1, col_ex2 = st.columns([4, 1])
-            with col_ex1:
-                # Display the example text
-                st.markdown(f'<div class="example-box">{example}</div>', unsafe_allow_html=True)
-            with col_ex2:
-                # Use button with callback
-                if st.button("Use →", key=f"use_example_{i}", use_container_width=True):
-                    set_example_text(example)
-                    st.rerun()
-        
-        # Show which example was used if any
-        if st.session_state.example_used:
-            st.success("✅ Example loaded! Click the transliterate button on the right.")
-            # Reset the flag
-            st.session_state.example_used = False
-    
-    with col2:
-        st.subheader("📤 Output")
-        
-        # Always show the transliterate button when model is loaded
-        st.markdown("### Transliteration")
-        
-        # Show current input text
-        if st.session_state.input_text:
-            st.info(f"**Text to transliterate:**\n{st.session_state.input_text}")
-        
-        # The transliterate button
-        if st.button(
-            "🚀 Transliterate", 
-            use_container_width=True, 
-            type="primary",
-            key="transliterate_btn_main"
-        ):
-            if not st.session_state.input_text.strip():
-                st.warning("⚠️ Please enter some text to transliterate.")
-            else:
-                with st.spinner("🔄 Transliterating..."):
-                    try:
-                        # Perform transliteration
-                        output_text = transliterate_text(model, st.session_state.input_text, sp, device)
-                        
-                        # Store result in session state
-                        st.session_state.last_output = output_text
-                        
-                        # Display result
-                        st.markdown('<div class="result-box">', unsafe_allow_html=True)
-                        st.markdown("**Transliterated Text:**")
-                        st.success(output_text)
-                        st.markdown('</div>', unsafe_allow_html=True)
-                        
-                        # Copy to clipboard functionality
-                        st.code(output_text, language="text")
-                        
-                        # Download button for result
-                        st.download_button(
-                            label="📥 Download Result",
-                            data=output_text,
-                            file_name="transliterated_text.txt",
-                            mime="text/plain",
-                            key="download_btn"
-                        )
-                        
-                        # Show success message
-                        st.balloons()
-                        
-                    except Exception as e:
-                        st.error(f"❌ Error during transliteration: {str(e)}")
-                        st.info("💡 Try a different text or check if the model files are complete.")
-        
-        # Show previous result if available
-        elif st.session_state.last_output:
-            st.markdown("**Previous transliteration:**")
-            st.markdown('<div class="result-box">', unsafe_allow_html=True)
-            st.success(st.session_state.last_output)
-            st.markdown('</div>', unsafe_allow_html=True)
-            st.code(st.session_state.last_output, language="text")
-        
-        # Show instruction when no text is entered
-        elif not st.session_state.input_text.strip():
-            st.info("👆 **To get started:**\n1. Enter text OR click an example on the left\n2. Click the **Transliterate** button above\n3. View your results here!")
-        
-        # Show additional help
-        st.markdown("---")
-        st.markdown("### 💡 Need help?")
-        st.markdown("""
-        - **Click any example** on the left to auto-fill the text box
-        - **Modify the text** if needed
-        - **Click Transliterate** to see results
-        - **Download** your transliterated text
-        """)
-    
-    # Additional information
-    st.markdown("---")
-    col_info1, col_info2 = st.columns(2)
-    
-    with col_info1:
-        st.markdown("### ℹ️ Model Info")
-        st.markdown(f"""
-        - **Architecture**: Seq2Seq with LSTM
-        - **Encoder**: Bidirectional LSTM  
-        - **Device**: {device}
-        - **Vocab Size**: {sp.get_piece_size() if sp else 'N/A'}
-        - **Model File**: {os.path.getsize('best_seq2seq_joint.pth') // 1024 if os.path.exists('best_seq2seq_joint.pth') else 0} KB
-        """)
-    
-    with col_info2:
-        st.markdown("### 📝 Usage Tips")
-        st.markdown("""
-        - Examples are in Urdu script
-        - Click "Use →" next to any example
-        - The text will appear in the input box
-        - Click "Transliterate" to see results
-        - Works with any Urdu/English text
-        """)
+    # Transliterate button
+    if st.button("🚀 TRANSLITERATE", type="primary", use_container_width=True):
+        if st.session_state.current_text.strip():
+            # Perform transliteration
+            try:
+                # TODO: Call your transliterate function here
+                # output = transliterate_text(model, st.session_state.current_text, sp, device)
+                output = f"Transliterated: {st.session_state.current_text}"  # Placeholder
+                st.session_state.output = output
+            except Exception as e:
+                st.session_state.output = f"Error: {str(e)}"
+        else:
+            st.session_state.output = "Please enter some text first."
 
-if __name__ == "__main__":
-    main()
+with col2:
+    st.subheader("Output")
+    
+    if st.session_state.output:
+        st.success(st.session_state.output)
+        st.code(st.session_state.output)
+    else:
+        st.info("Enter text and click TRANSLITERATE to see results")
+
+    # Debug info
+    with st.expander("Debug Info"):
+        st.write(f"Current text: {st.session_state.current_text}")
+        st.write(f"Output: {st.session_state.output}")
